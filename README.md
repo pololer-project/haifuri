@@ -41,7 +41,7 @@
 
 | Track        | Codec | Channels | Bitrate | Source | Default | Forced |
 | ------------ | ----- | -------- | ------- | ------ | ------- | ------ |
-| **Japanese** | FLAC  | 2.0      |         | Beatrice-Raws | Yes     | No     |
+| **Japanese** | FLAC  | 2.0      | 785 kb/s (16 bits/48kHz) | Beatrice-Raws | Yes     | No     |
 
 ---
 
