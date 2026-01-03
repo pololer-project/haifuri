@@ -34,7 +34,9 @@ jobs:
         run: uv sync
 
       - name: Run mux-system.py dry-run test
-        run: uv run python mux-system.py all -d
+        run: |
+           mkdir _workdir -ErrorAction SilentlyContinue
+           uv run python mux-system.py all -d | Tee-Object -FilePath "_workdir/dry-run.log"
 
       - name: Upload test workdir
         uses: actions/upload-artifact@v6
