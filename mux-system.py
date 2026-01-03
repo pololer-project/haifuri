@@ -254,6 +254,14 @@ def parse_episodes(arg: str) -> list[str | int]:
         extras = {
             p.stem for p in CONFIG.sub_dir.glob("*.ass") if not p.stem[:2].isdigit()
         }
+
+        # Check for NCs in songs dir
+        songs_dir = CONFIG.sub_dir.parent / "songs"
+        if (songs_dir / "OP.ass").exists():
+            extras.add("NCOP")
+        if (songs_dir / "ED.ass").exists():
+            extras.add("NCED")
+
         return sorted(list(eps) + list(extras), key=lambda x: str(x))
 
     eps = []
