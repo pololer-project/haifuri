@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-MuxTools Automation Script for Anime Muxing.
+MuxTools Automation Script for High School Fleet.
 
 Automates the process of muxing anime episodes using MuxTools.
- Optimized for efficiency and relative path resolution.
+Optimized for efficiency, readability, and correct resource resolution.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class ShowConfig:
     @classmethod
     def from_defaults(cls) -> ShowConfig:
         """Create configuration relative to the script location."""
-        # Resolution relative to d:\haifuri\ (root)
+        # Resolution relative to script location (root)
         base = Path(__file__).resolve().parent
 
         return cls(
@@ -59,7 +59,7 @@ class ShowConfig:
             premux_dir=base / "premux",
             audio_dir=base / "audio",
             sub_dir=base / "subtitle",
-            tmdb_id=66105,  # Haifuri TMDB ID
+            tmdb_id=66105,
             titles=None,
         )
 
@@ -69,17 +69,91 @@ CONFIG = ShowConfig.from_defaults()
 
 @dataclass(slots=True)
 class MuxResult:
-    episode: int
+    episode: str | int
     success: bool
     error: str | None = None
 
 
-def _get_episode_str(episode: int) -> str:
-    return f"{episode:02d}"
+def _get_episode_str(episode: str | int) -> str:
+    """Convert episode identifier to standard string format."""
+    if isinstance(episode, int):
+        return f"{episode:02d}"
+    return str(episode)
+
+
+def _find_video(ep_str: str, config: ShowConfig) -> Path:
+    """Find the video file for the given episode string."""
+    search = GlobSearch(
+        "*.mkv", allow_multiple=True, recursive=True, dir=str(config.premux_dir)
+    )
+
+    for p in search.paths:
+        name = Path(p).name
+
+        # Standard episode match: " - 01 " or "E01)"
+        if f" - {ep_str} " in name or f"E{ep_str})" in name:
+            return Path(p)
+
+        # OVA match: "OVA" and " - 01 "
+        if ep_str.startswith("OVA") and "OVA" in name:
+            ova_num = ep_str.replace("OVA", "")
+            if f" - {ova_num:0>2} " in name:
+                return Path(p)
+
+        # NC match
+        if ep_str.startswith("NC") and ep_str in name:
+            return Path(p)
+
+    raise FileNotFoundError(f"Video file not found for episode {ep_str}")
+
+
+def _find_audio(ep_str: str, config: ShowConfig) -> AudioFile:
+    """Find audio files for the given episode string."""
+    search = GlobSearch(
+        "*.flac", allow_multiple=True, recursive=True, dir=str(config.audio_dir)
+    )
+
+    # Filter for exact episode match
+    candidates = [p for p in search.paths if f" - {ep_str} " in Path(p).name]
+
+    if not candidates:
+        raise FileNotFoundError(f"Audio files not found for episode {ep_str}")
+
+    # Apply -1000ms delay only for NCOP/NCED
+    delay = -1000 if ep_str.startswith("NC") else 0
+    return AudioFile(candidates, container_delay=delay)
+
+
+def _find_subtitle(ep_str: str, config: ShowConfig) -> SubFile:
+    """Find and prepare the subtitle file."""
+    # Special handling for NCOP/NCED
+    if ep_str.startswith("NCOP"):
+        sub_path = config.sub_dir.parent / "songs" / "OP.ass"
+    elif ep_str.startswith("NCED"):
+        sub_path = config.sub_dir.parent / "songs" / "ED.ass"
+    else:
+        # Standard search
+        sub_path = config.sub_dir / f"{ep_str}.ass"
+        if not sub_path.exists():
+            # Fallback to glob search
+            search = GlobSearch(f"*{ep_str}*.ass", dir=str(config.sub_dir))
+            if not search.paths:
+                raise FileNotFoundError(f"Subtitle file not found for episode {ep_str}")
+            sub_path = Path(search.paths[0])
+
+    if not sub_path.exists():
+        raise FileNotFoundError(f"Subtitle file not found at {sub_path}")
+
+    # Apply -1000ms delay only for NCOP/NCED
+    delay = -1000 if ep_str.startswith("NC") else 0
+    sub = SubFile(str(sub_path), container_delay=delay)
+    # Apply cleaning
+    sub.merge(r"common/warning.ass").clean_styles().clean_garbage()
+    return sub
 
 
 def mux_episode(
-    episode: int,
+    episode: str | int,
     out_dir: Path,
     version: int = 1,
     flag: str = "testing",
@@ -92,7 +166,11 @@ def mux_episode(
 
     # Title handling
     title = ""
-    if config.titles and 1 <= episode <= len(config.titles):
+    if (
+        isinstance(episode, int)
+        and config.titles
+        and 1 <= episode <= len(config.titles)
+    ):
         title = f" | {config.titles[episode - 1]}"
 
     setup = Setup(
@@ -109,46 +187,30 @@ def mux_episode(
         log.info(f"[Dry Run] Would mux episode {ep_str} to {out_dir}")
         return MuxResult(episode, True)
 
-    # 1. Video
-    video_search = GlobSearch(f"*{ep_str}*.mkv", dir=str(config.premux_dir))
-    if not video_search.paths:
-        return MuxResult(episode, False, "Video file not found")
-    video_file = video_search.paths[0]
-    setup.set_default_sub_timesource(video_file)
-
-    # 2. Audio
-    audio_search = GlobSearch(
-        f"*{ep_str}*.flac", allow_multiple=True, dir=str(config.audio_dir)
-    )
-    if not audio_search.paths:
-        return MuxResult(episode, False, "Audio files not found")
-    audio_files = AudioFile(audio_search.paths)
-
-    # 3. Subtitles
-    # Try looking for "01.ass" or "*01*.ass" in current dir
-    sub_path = config.sub_dir / f"{ep_str}.ass"
-    if not sub_path.exists():
-        # Fallback search if exact match fails
-        sub_search = GlobSearch(f"*{ep_str}*.ass", dir=str(config.sub_dir))
-        if not sub_search.paths:
-            return MuxResult(episode, False, "Subtitle file not found")
-        sub_path = Path(sub_search.paths[0])
-
-    sub_file = SubFile(str(sub_path))
-    sub_file.merge(r"common/warning.ass").clean_styles().clean_garbage()
-
-    # 4. Chapters & Fonts
-    chapters = Chapters.from_mkv(video_file)
-
-    # Collect fonts from 'fonts' folder and songs folder (relative from subtitle dir)
-    font_paths = [config.sub_dir / "fonts", config.sub_dir.parent / "songs" / "fonts"]
-    valid_font_paths = [p for p in font_paths if p.exists()]
-    fonts = sub_file.collect_fonts(
-        use_system_fonts=False, additional_fonts=valid_font_paths
-    )
-
-    # 5. Mux
     try:
+        # Locating Resources
+        video_file = _find_video(ep_str, config)
+        setup.set_default_sub_timesource(video_file)
+
+        audio_files = _find_audio(ep_str, config)
+        sub_file = _find_subtitle(ep_str, config)
+
+        # Chapters & Fonts
+        if ep_str.startswith("NC"):
+            chapters = []
+        else:
+            chapters = Chapters.from_mkv(video_file)
+
+        font_paths = [
+            config.sub_dir / "fonts",
+            config.sub_dir.parent / "songs" / "fonts",
+        ]
+        valid_font_paths = [p for p in font_paths if p.exists()]
+        fonts = sub_file.collect_fonts(
+            use_system_fonts=False, additional_fonts=valid_font_paths
+        )
+
+        # Muxing
         premux = Premux(
             video_file,
             audio=None,
@@ -157,49 +219,70 @@ def mux_episode(
             mkvmerge_args=["--no-global-tags", "--no-chapters"],
         )
 
-        outfile = mux(
+        mux_args = [
             premux,
             audio_files.to_track("Japanese", "ja", default=True),
             sub_file.to_track(flag, "id", default=True),
             *fonts,
-            chapters,
+        ]
+
+        if chapters:
+            mux_args.append(chapters)
+
+        outfile = mux(
+            *mux_args,
             tmdb=TmdbConfig(config.tmdb_id, write_cover=True),
         )
         log.info(f"Muxed: {outfile.name}")
         return MuxResult(episode, True)
+
     except Exception as e:
         log.error(f"Failed to mux {ep_str}: {e}")
         return MuxResult(episode, False, str(e))
 
 
-def parse_episodes(arg: str) -> list[int]:
+def parse_episodes(arg: str) -> list[str | int]:
+    """Parse episode argument into a list of episode identifiers."""
     if arg.lower() == "all":
-        # Auto-discovery
-        return sorted(
-            {
-                int(p.stem[:2])
-                for p in CONFIG.sub_dir.glob("*.ass")
-                if p.stem[:2].isdigit()
-            }
-        )
+        # Integer episodes
+        eps = {
+            int(p.stem[:2])
+            for p in CONFIG.sub_dir.glob("*.ass")
+            if p.stem[:2].isdigit()
+        }
+        # String episodes (OVA, NC)
+        extras = {
+            p.stem for p in CONFIG.sub_dir.glob("*.ass") if not p.stem[:2].isdigit()
+        }
+        return sorted(list(eps) + list(extras), key=lambda x: str(x))
 
-    eps = set()
+    eps = []
     for part in arg.split(","):
-        if "-" in part:
+        part = part.strip()
+        if "-" in part and part.replace("-", "").isdigit():
             start, end = map(int, part.split("-"))
-            eps.update(range(start, end + 1))
+            eps.extend(range(start, end + 1))
+        elif part.isdigit():
+            eps.append(int(part))
         else:
-            eps.add(int(part))
-    return sorted(eps)
+            eps.append(part)
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(eps))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Optimized Mux System")
-    parser.add_argument("episodes", help="Episodes to mux (e.g., 1, 1-5, all)")
-    parser.add_argument("outdir", nargs="?", default="muxed", help="Output directory")
     parser.add_argument(
-        "-f", "--flag", default="BestRelease", help="Release group/flag"
+        "episodes", help="Episodes to mux (e.g., 1, 1-5, all, OVA1, NCOP)"
     )
+    parser.add_argument(
+        "outdir",
+        nargs="?",
+        default="muxed",
+        help="Output directory",
+    )
+    parser.add_argument("-f", "--flag", default="pololer", help="Release group/flag")
     parser.add_argument("-d", "--dry-run", action="store_true", help="Dry run")
     parser.add_argument("-v", "--version", type=int, default=1, help="Version number")
 
@@ -208,7 +291,7 @@ def main() -> int:
     try:
         episodes = parse_episodes(args.episodes)
     except ValueError:
-        log.error("Invalid episode specifcation")
+        log.error("Invalid episode specification")
         return 1
 
     if not episodes:
